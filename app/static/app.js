@@ -12,6 +12,7 @@ const state = {
   elevation: null, // /api/elevation 返回结果
   drift: null,    // /api/drift 返回结果
   stays: null,    // /api/stays 返回结果
+  simplify: null, // /api/simplify 返回结果
   transform: null,
 };
 
@@ -108,6 +109,13 @@ function draw() {
     }
   }
 
+  // 精简轨迹（绿）
+  if (state.simplify) {
+    for (const seg of state.simplify.segments) {
+      drawPolyline(seg, "#43a047", 2.5 * dpr);
+    }
+  }
+
   // 遮蔽圆
   const t = state.transform;
   for (const c of state.circles) {
@@ -199,7 +207,9 @@ async function uploadFile(file) {
   state.elevation = null;
   state.drift = null;
   state.stays = null;
+  state.simplify = null;
   document.getElementById("download-fixed").disabled = true;
+  document.getElementById("download-simplified").disabled = true;
   computeTransform();
   renderTrackInfo(data.stats);
   renderCircleList();
@@ -208,6 +218,7 @@ async function uploadFile(file) {
   await refreshElevation();
   await refreshDrift();
   await refreshStays();
+  await refreshSimplify();
 }
 
 let paceTimer = null;
@@ -339,6 +350,59 @@ async function refreshStays() {
     el.innerHTML = `<div class="pace-error">无法识别停留：${escapeHtml(err.message)}</div>`;
   }
   draw();
+}
+
+let simplifyTimer = null;
+function scheduleSimplify() {
+  clearTimeout(simplifyTimer);
+  simplifyTimer = setTimeout(refreshSimplify, 250);
+}
+
+function toleranceValue() {
+  const input = document.getElementById("tolerance-m");
+  let v = Number(input.value);
+  if (!input.value || !Number.isFinite(v)) v = 10;
+  return Math.min(100, Math.max(1, v));
+}
+
+async function refreshSimplify() {
+  if (!state.trackId) return;
+  const el = document.getElementById("simplify");
+  try {
+    const res = await fetch("/api/simplify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: state.trackId, tolerance_m: toleranceValue() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(errDetail(data, "轨迹精简失败"));
+    state.simplify = data;
+    renderSimplify(data);
+  } catch (err) {
+    state.simplify = null;
+    el.classList.remove("muted");
+    el.innerHTML = `<div class="pace-error">无法精简轨迹：${escapeHtml(err.message)}</div>`;
+    document.getElementById("download-simplified").disabled = true;
+  }
+  draw();
+}
+
+async function downloadSimplifiedGpx() {
+  if (!state.trackId) return;
+  try {
+    const res = await fetch("/api/simplify/export", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ track_id: state.trackId, tolerance_m: toleranceValue() }),
+    });
+    if (!res.ok) {
+      const data = await res.json();
+      throw new Error(errDetail(data, "导出失败"));
+    }
+    saveBlob(await res.blob(), `${state.name || "track"}-simplified.gpx`);
+  } catch (err) {
+    showMessage(err.message);
+  }
 }
 
 function saveBlob(blob, filename) {
@@ -603,6 +667,20 @@ function renderStays(data) {
   el.innerHTML = html;
 }
 
+function renderSimplify(data) {
+  const el = document.getElementById("simplify");
+  el.classList.remove("muted");
+  const kept = data.points_before > 0
+    ? ((100 * data.points_after) / data.points_before).toFixed(1)
+    : "—";
+  el.innerHTML =
+    `<div>轨迹点：<b>${data.points_before}</b> → <b>${data.points_after}</b> 个` +
+    `（保留 ${kept}%）</div>` +
+    `<div>精简分段：<b>${data.segments.length}</b> 个 trkseg（互不连接）</div>` +
+    `<div>误差阈值：<b>${data.tolerance_m}</b> 米</div>`;
+  document.getElementById("download-simplified").disabled = false;
+}
+
 function renderCircleList() {
   const ul = document.getElementById("circle-list");
   ul.innerHTML = "";
@@ -693,11 +771,18 @@ document.getElementById("clear-circles").addEventListener("click", () => {
 
 document.getElementById("download").addEventListener("click", downloadGpx);
 document.getElementById("download-fixed").addEventListener("click", downloadFixedGpx);
+document.getElementById("download-simplified").addEventListener("click", downloadSimplifiedGpx);
 
 document.getElementById("split-km").addEventListener("input", schedulePace);
 document.getElementById("split-km").addEventListener("change", (e) => {
   e.target.value = splitKmValue();  // 越界/非法输入收敛到 0.1～10
   refreshPace();
+});
+
+document.getElementById("tolerance-m").addEventListener("input", scheduleSimplify);
+document.getElementById("tolerance-m").addEventListener("change", (e) => {
+  e.target.value = toleranceValue();  // 越界/非法输入收敛到 1～100
+  refreshSimplify();
 });
 
 window.addEventListener("resize", resizeCanvas);

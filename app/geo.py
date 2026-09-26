@@ -48,6 +48,11 @@ def _to_xy(lat: float, lon: float, lat0: float, lon0: float) -> tuple:
     return x, y
 
 
+def to_local_xy_m(p: TrackPoint, origin: TrackPoint) -> tuple:
+    """点 p 在以 origin 为原点的局部等距圆柱投影中的坐标（米）。"""
+    return _to_xy(p.lat, p.lon, origin.lat, origin.lon)
+
+
 def point_segment_distance_m(p: TrackPoint, a: TrackPoint, b: TrackPoint) -> float:
     """点 p 到线段 ab 的水平最短距离（米）。
 

@@ -1,7 +1,8 @@
 # 徒步轨迹分享 · 敏感地点遮蔽
 
 上传含时间的 GPX 轨迹，自动统计**分段配速**、**海拔剖面 / 累计爬升**、**停留识别**
-（停留 / 移动时长）并检测**单点漂移跳点**（可下载修复后的 GPX）；在**无底图**预览图上
+（停留 / 移动时长）、检测**单点漂移跳点**（可下载修复后的 GPX）并按 **Douglas-Peucker
+算法精简轨迹**（可下载精简后的 GPX）；在**无底图**预览图上
 点击敏感地点（如家、公司）并设定遮蔽半径，系统按**轨迹线段与遮蔽圆的交点**精确裁切，
 导出为**互不连接的 GPX `trkseg`** 后再分享。
 
@@ -27,6 +28,7 @@ docker compose up --build
 | 对外端口 | `docker-compose.yml` 中 `ports` | 默认 `"8000:8000"`，改左侧即可（如 `"8080:8000"`） |
 | 上传大小限制 | `app/main.py` 中 `MAX_UPLOAD_BYTES` | 默认 50 MB |
 | 每段里程 | 页面"分段配速"输入框，或 `/api/pace` 的 `split_km` | 0.1～10 公里，默认 1 公里 |
+| 精简误差阈值 | 页面"轨迹精简"输入框，或 `/api/simplify` 的 `tolerance_m` | 1～100 米，默认 10 米 |
 | 停留判定口径 | `app/stay.py` 中 `STAY_RADIUS_M` / `MIN_STAY_S` / `MAX_GAP_S` | 30 米 / 3 分钟 / 10 分钟（记录中断阈值） |
 | 数据存储 | 内存 | 演示用途：轨迹仅存内存，容器重启即清空，无需数据库 |
 
@@ -45,11 +47,15 @@ docker compose up --build
    跳点后的轨迹。遮蔽裁切、配速与海拔统计始终使用**原始轨迹**，不受修复影响。
 5. **查看停留识别**：页面自动识别**停留**（同一地点逗留 ≥ 3 分钟），停留位置以紫色"停"
    标记在预览图上，并列出每次停留的位置、起止时间与时长，以及**全程记录 / 停留 / 移动时长**。
-6. **设置遮蔽**：在右侧预览图上**点击**敏感地点即添加遮蔽圆，半径在左侧面板设定
+6. **轨迹精简**：输入**误差阈值**（1～100 米，默认 10 米，修改后自动重算），页面按
+   Douglas-Peucker 算法精简原始轨迹，绿色精简线叠加在预览图上，并显示**精简前 / 后点数**；
+   点击"下载精简后的 GPX"得到与预览一致的精简轨迹。精简基于上传时保存的原始轨迹，
+   原始轨迹与遮蔽、配速、海拔、漂移、停留统计均不受影响。
+7. **设置遮蔽**：在右侧预览图上**点击**敏感地点即添加遮蔽圆，半径在左侧面板设定
    （添加前设定新圆半径；已有圆可在列表中单独修改或删除）。
-7. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
+8. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
    蓝色为可见轨迹，红色虚线为被隐藏段。
-8. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
+9. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
 
 ## 分段配速规则（实现要点）
 
@@ -112,6 +118,24 @@ docker compose up --build
   （分段间隔不计入，与分段配速口径一致）；**停留时长** = 各停留区间内有效相邻采样
   时差之和（区间互不重叠，可安全求和）；**移动时长** = 记录时长 − 停留时长。
 
+## 轨迹精简规则（实现要点）
+
+- **按原始 trkseg 独立精简**：每个原始 `trkseg` 单独做 Douglas-Peucker 抽稀，
+  精简结果不跨分段边界连线，导出时每个 `trkseg` 精简为一个独立 `trkseg`。
+- **局部米制平面**：将该段经纬度投影到以**段首点为原点**的局部等距圆柱平面（米），
+  所有偏差计算都在该平面内进行。
+- **点到有限线段的距离**：对每个候选区间，以区间内各点到**首尾有限线段**（投影参数
+  截断到 [0, 1]，而非无限直线）的最短距离选取**最大偏差点**；仅当最大偏差**超过**
+  误差阈值（1～100 米）时才在该点拆分，对两个子区间递归处理。
+- **首尾重合**：区间首尾点重合（弦长为零，如环线起点=终点）时，偏差退化为
+  **点到端点的距离**。
+- **保留原始点**：每段首尾点与选中的偏差点直接引用原始轨迹点，**经纬度、海拔、时间
+  原样保留**，不做插值；单点段、两点段原样保留，重复点（零长度弦）按点到端点距离处理。
+- **迭代实现**：拆分使用显式栈而非递归，十万点输入不会触发递归栈溢出。
+- **精简结果独立**：精简只用于"轨迹精简"区块的展示与精简后 GPX 导出（文件名
+  `<轨迹名>-simplified.gpx`）；遮蔽裁切、配速、海拔、漂移、停留均继续使用上传时保存的
+  原始轨迹，上传的原始轨迹不会被修改。
+
 ## 裁切规则（实现要点）
 
 - **穿越识别**：对每个原始采样线段与每个遮蔽圆求解析交点（局部切平面投影中解二次方程），
@@ -128,15 +152,16 @@ docker compose up --build
 
 ```
 app/
-  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、/api/drift、/api/drift/export、/api/stays、静态页面
-  geo.py           # 几何核心：haversine、点到线段距离、线段-圆求交、按可见性裁切
+  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、/api/drift、/api/drift/export、/api/stays、/api/simplify、/api/simplify/export、静态页面
+  geo.py           # 几何核心：haversine、局部切平面投影、点到线段距离、线段-圆求交、按可见性裁切
   pace.py          # 分段配速：按固定里程切段、边界时间插值
   elevation.py     # 海拔剖面：20 米重采样、三点中位数、5 米反向确认峰谷、累计爬升/下降
   drift.py         # 单点漂移：跳点判定（速度 + 偏移阈值）、逐轮删除最早命中点
   stay.py          # 停留识别：锚点扩展（30 米 / 3 分钟）、记录中断（10 分钟）、记录/停留/移动时长
+  simplify.py      # 轨迹精简：Douglas-Peucker（局部米制平面、点到有限线段距离、迭代实现）
   gpxutil.py       # GPX 1.1 解析（强制要求 time）与多 trkseg 导出
   static/          # 原生 JS 前端（index.html / app.js / style.css）
-tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）、test_drift.py（漂移 12 项）、test_stay.py（停留 14 项）
+tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）、test_drift.py（漂移 12 项）、test_stay.py（停留 14 项）、test_simplify.py（精简 17 项）
 examples/sample.gpx# 示例轨迹（两个 trkseg，含时间与海拔）
 Dockerfile         # python:3.12-slim，构建期安装依赖，启动即运行
 docker-compose.yml # 单服务，映射 8000 端口
@@ -155,6 +180,7 @@ python3 tests/test_pace.py       # 分段配速
 python3 tests/test_elevation.py  # 海拔剖面与累计爬升
 python3 tests/test_drift.py      # 单点漂移检测与修复
 python3 tests/test_stay.py       # 停留识别与记录/移动时长
+python3 tests/test_simplify.py   # 轨迹精简（Douglas-Peucker）
 # 或：python3 -m pytest tests/
 ```
 
@@ -170,6 +196,8 @@ python3 tests/test_stay.py       # 停留识别与记录/移动时长
 | `POST` | `/api/drift` | `{track_id}` → 单点漂移检测结果与修复前后里程（见下） |
 | `POST` | `/api/drift/export` | `{track_id}` → 删除跳点后的 GPX 文件下载 |
 | `POST` | `/api/stays` | `{track_id}` → 停留识别结果与记录/停留/移动时长（见下） |
+| `POST` | `/api/simplify` | `{track_id, tolerance_m?}` → 精简前后点数与精简后分段（见下） |
+| `POST` | `/api/simplify/export` | 同上参数，返回精简后的 GPX 文件下载 |
 
 ### `POST /api/pace` 分段配速
 
@@ -245,4 +273,23 @@ curl -X POST http://localhost:8000/api/drift \
 curl -X POST http://localhost:8000/api/stays \
   -H "Content-Type: application/json" \
   -d '{"track_id": "<上传返回的 track_id>"}'
+```
+
+### `POST /api/simplify` 轨迹精简（Douglas-Peucker）
+
+- **参数**：`track_id`（必填，上传返回值）；`tolerance_m`（可选，误差阈值，**1～100 米**，
+  默认 **10**，超出范围返回 422）。
+- **返回**：`tolerance_m`（实际使用的阈值）、`points_before` / `points_after`
+  （精简前 / 后轨迹点数）与 `segments`（精简后分段，与原始 `trkseg` 一一对应、互不连接；
+  每个点含 `lat` / `lon` / `ele` / `time`，均为原始轨迹点的原样值）。
+- **错误**：`track_id` 不存在返回 `404`。
+- **`POST /api/simplify/export`**：参数相同，返回精简后的 GPX 下载（与页面预览同源、
+  数据一致；保留原始 `trkseg` 结构与每段首尾点，文件名为 `<轨迹名>-simplified.gpx`）。
+
+示例：
+
+```bash
+curl -X POST http://localhost:8000/api/simplify \
+  -H "Content-Type: application/json" \
+  -d '{"track_id": "<上传返回的 track_id>", "tolerance_m": 20}'
 ```
