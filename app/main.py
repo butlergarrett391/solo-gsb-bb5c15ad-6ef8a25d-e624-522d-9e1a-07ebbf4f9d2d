@@ -1,4 +1,4 @@
-"""FastAPI 入口：上传 GPX、遮蔽计算、导出、分段配速、海拔分析、漂移修复、停留识别、静态页面。"""
+"""FastAPI 入口：上传 GPX、遮蔽计算、导出、分段配速、海拔分析、漂移修复、停留识别、轨迹精简、静态页面。"""
 from __future__ import annotations
 
 import uuid
@@ -15,6 +15,12 @@ from .elevation import RESAMPLE_STEP_M, REVERSAL_THRESHOLD_M, elevation_profile
 from .geo import MaskCircle, haversine_m, mask_track
 from .gpxutil import build_gpx, parse_gpx
 from .pace import DEFAULT_SPLIT_KM, MAX_SPLIT_KM, MIN_SPLIT_KM, pace_splits
+from .simplify import (
+    DEFAULT_TOLERANCE_M,
+    MAX_TOLERANCE_M,
+    MIN_TOLERANCE_M,
+    simplify_track,
+)
 from .stay import MAX_GAP_S, MIN_STAY_S, STAY_RADIUS_M, detect_stays
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -54,6 +60,13 @@ class DriftRequest(BaseModel):
 
 class StayRequest(BaseModel):
     track_id: str
+
+
+class SimplifyRequest(BaseModel):
+    track_id: str
+    tolerance_m: float = Field(
+        default=DEFAULT_TOLERANCE_M, ge=MIN_TOLERANCE_M, le=MAX_TOLERANCE_M
+    )
 
 
 def _point_dict(p):
@@ -302,6 +315,44 @@ def stays(req: StayRequest):
             "max_gap_s": MAX_GAP_S,
         },
     }
+
+
+def _run_simplify(track, tolerance_m):
+    """对原始轨迹执行 Douglas-Peucker 精简；阈值越界时转为 400 明确提示。"""
+    try:
+        return simplify_track(track["segments"], tolerance_m)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/simplify")
+def simplify(req: SimplifyRequest):
+    """轨迹精简：基于上传时保存的原始轨迹计算，不修改原轨迹，与其余统计互不影响。"""
+    track = _get_track(req.track_id)
+    result = _run_simplify(track, req.tolerance_m)
+    return {
+        "tolerance_m": req.tolerance_m,
+        "segments": [[_point_dict(p) for p in seg] for seg in result.simplified_segments],
+        "points_before": result.points_before,
+        "points_after": result.points_after,
+        "distance_before_m": result.distance_before_m,
+        "distance_after_m": result.distance_after_m,
+    }
+
+
+@app.post("/api/simplify/export")
+def simplify_export(req: SimplifyRequest):
+    """导出精简后的 GPX：与页面预览使用同一算法与参数，结果一致；保留原始 trkseg 结构。"""
+    track = _get_track(req.track_id)
+    result = _run_simplify(track, req.tolerance_m)
+    name = f"{track['name']}-simplified"
+    gpx_bytes = build_gpx(result.simplified_segments, name)
+    filename = quote(f"{name}.gpx")
+    return Response(
+        content=gpx_bytes,
+        media_type="application/gpx+xml",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
